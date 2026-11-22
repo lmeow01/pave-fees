@@ -10,7 +10,7 @@ total when the period closes. Built on Encore (API, infrastructure), Temporal
 |---|---|
 | F1 | Create a bill at the start of a billing period. This starts the bill's workflow. |
 | F2 | Add line items to an open bill. |
-| F3 | Close a bill. The response states the total charged and the line items charged (the first 100 inline, the rest through the paged list; see section 4). |
+| F3 | Close a bill. The response states the total charged and the line items charged. Line items are paged: up to 100 in the response, the rest behind a page token (section 4, "Close"). |
 | F4 | Reject a line item once the bill is closed. |
 | F5 | Bills are in GEL or USD. |
 | F6 | A bill closes itself when its period ends, if nobody closed it earlier. |
@@ -151,8 +151,39 @@ Idempotency-Key: 0b5c9f6e-3d0c-4d53-8a55-0f9d1f1c2a77
 }
 ```
 
-**Close** returns the bill with `"status": "closed"`, `closed_at` set,
-`total_amount` final and its `line_items`.
+**Close** returns the bill with `"status": "closed"`, `closed_at` set, the
+final `total_amount`, and its line items.
+
+```json
+{
+  "id": "bill_019a9c2e5b7a7c3e9d3f5a1b2c3d4e5f",
+  "status": "closed",
+  "closed_at": "2026-12-01T00:00:00.004211Z",
+  "total_amount": "1345",
+  "line_items": {
+    "data": [
+      {"id": "line_item_019a9c2f0c117e0a8b6d4c3b2a190807", "description": "SWIFT transfer fee", "amount": "1050", "currency": "USD", "...": "..."},
+      {"id": "line_item_019a9c2f1d227f1b9c7e5d4c3b2a1908", "description": "Account maintenance", "amount": "295", "currency": "USD", "...": "..."}
+    ],
+    "next_page_token": ""
+  }
+}
+```
+
+The brief asks for "all the line items" on close. How that is met depends on
+the size of the bill:
+
+| Bill | What the close response holds |
+|---|---|
+| Up to 100 line items | Every line item. `next_page_token` is empty, which is the statement that nothing is missing. |
+| More than 100 | The first 100, and a `next_page_token`. The caller reads the rest from `GET /v1/bills/{id}/line-items?next_page_token=...` until the token comes back empty. |
+
+In both cases `total_amount` is the sum of every line item on the bill, not of
+the ones in the response. The alternative, returning every line item
+unpaged, has no upper bound on the response: a bill that accrued a fee per
+transaction for a month could be hundreds of megabytes, built in memory on
+every close and every read. The closed bill no longer changes, so paging
+through it returns exactly the items the total was computed from.
 
 **Lists and pagination** follow the shape of Pave's list endpoints: `page_size`
 and `next_page_token` query parameters, and a `{"data": [...],

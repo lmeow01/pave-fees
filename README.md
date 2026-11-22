@@ -65,7 +65,8 @@ curl -s "localhost:4000/v1/bills/$BILL/line-items?page_size=1" | jq
 # List the customer's bills
 curl -s "localhost:4000/v1/bills?customer_id=customer_42" | jq
 
-# Close: total_amount is "1345", with both line items
+# Close: total_amount is "1345", with both line items. A bill with more than
+# 100 line items returns the first 100 and a next_page_token for the rest.
 curl -s -X POST localhost:4000/v1/bills/$BILL/close | jq
 
 # Rejected: the bill is closed
@@ -79,6 +80,17 @@ repeating a request with the same `Idempotency-Key` (same response, nothing
 added), and a bill with a `period_end` a minute away (it closes itself). The
 bill's workflow, with every accepted line item and the close, is visible in
 the Temporal UI under the bill's ID.
+
+## API reference
+
+The endpoints, with examples and the error table, are in section 4 of
+[specs.md](specs.md). While `task run` is up, Encore's dashboard at
+http://localhost:9400 has an API explorer for calling them. For Swagger UI or
+Postman, Encore generates an OpenAPI 3 document from the code:
+
+```sh
+encore gen client --lang=openapi --output=openapi.json
+```
 
 ## Verify
 
