@@ -91,7 +91,7 @@ func (p *AddLineItemParams) newLineItem() (billflow.NewLineItem, error) {
 }
 
 func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item billflow.NewLineItem) (billflow.LineItem, error) {
-	b, err := s.findBill(ctx, billID)
+	b, err := s.findBillState(ctx, billID)
 	if err != nil {
 		return billflow.LineItem{}, err
 	}
@@ -100,7 +100,7 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 	}
 
 	var stored billflow.LineItem
-	err = s.updateBill(ctx, b, client.UpdateWorkflowOptions{
+	err = s.updateBill(ctx, b.Workflow, client.UpdateWorkflowOptions{
 		UpdateName: billflow.UpdateAddLineItem,
 		UpdateID:   item.IdempotencyKey,
 		Args:       []any{item},
@@ -109,7 +109,7 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 	case err == nil:
 		return stored, nil
 	case billflow.IsCurrencyMismatch(err):
-		return billflow.LineItem{}, invalidArgument("currency does not match the bill's currency " + string(b.Currency))
+		return billflow.LineItem{}, invalidArgument("currency does not match the bill's currency " + string(b.Workflow.Currency))
 	case billflow.IsPermanentFailure(err):
 		return billflow.LineItem{}, errs.WrapCode(err, errs.Internal, "add line item")
 	}
@@ -123,7 +123,7 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 func (s *Service) addOutcomeFromRecord(ctx context.Context, billID, idempotencyKey string, updateErr error) (billflow.LineItem, error) {
 	unavailable := errs.WrapCode(updateErr, errs.Unavailable, "add line item")
 
-	b, err := s.findBill(ctx, billID)
+	b, err := s.findBillState(ctx, billID)
 	if err != nil {
 		return billflow.LineItem{}, unavailable
 	}
@@ -180,7 +180,7 @@ func (s *Service) ListLineItems(ctx context.Context, id string, p *ListLineItems
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.findBill(ctx, id); err != nil {
+	if _, err := s.findBillState(ctx, id); err != nil {
 		return nil, err
 	}
 	return s.lineItemList(ctx, id, p.NextPageToken, size)

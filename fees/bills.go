@@ -108,7 +108,7 @@ func (s *Service) CreateBill(ctx context.Context, p *CreateBillParams) (*Bill, e
 // startBillWorkflow is safe to repeat for the same open bill: a workflow that
 // is already running is reused.
 func (s *Service) startBillWorkflow(ctx context.Context, b bill) error {
-	_, err := s.temporal.ExecuteWorkflow(ctx, billWorkflowOptions(b), billflow.Bill, billWorkflowParams(b))
+	_, err := s.temporal.ExecuteWorkflow(ctx, billWorkflowOptions(b.ID), billflow.Bill, billWorkflowParams(b))
 	return err
 }
 
@@ -116,12 +116,12 @@ func (s *Service) startBillWorkflow(ctx context.Context, b bill) error {
 // first if it is not running. That repairs a bill whose workflow was never
 // started (CreateBill failed between its two steps and was not retried) or
 // was terminated.
-func (s *Service) updateBill(ctx context.Context, b bill, update client.UpdateWorkflowOptions, result any) error {
-	update.WorkflowID = b.ID
+func (s *Service) updateBill(ctx context.Context, params billflow.Params, update client.UpdateWorkflowOptions, result any) error {
+	update.WorkflowID = params.BillID
 	update.WaitForStage = client.WorkflowUpdateStageCompleted
 	handle, err := s.temporal.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
 		StartWorkflowOperation: s.temporal.NewWithStartWorkflowOperation(
-			billWorkflowOptions(b), billflow.Bill, billWorkflowParams(b)),
+			billWorkflowOptions(params.BillID), billflow.Bill, params),
 		UpdateOptions: update,
 	})
 	if err != nil {
@@ -132,9 +132,9 @@ func (s *Service) updateBill(ctx context.Context, b bill, update client.UpdateWo
 
 // billWorkflowOptions allow a new run only after a failed or terminated one,
 // so no second workflow starts for a bill whose workflow completed.
-func billWorkflowOptions(b bill) client.StartWorkflowOptions {
+func billWorkflowOptions(billID string) client.StartWorkflowOptions {
 	return client.StartWorkflowOptions{
-		ID:                       b.ID,
+		ID:                       billID,
 		TaskQueue:                taskQueue,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY,
@@ -226,7 +226,7 @@ func (s *Service) CloseBill(ctx context.Context, id string) (*Bill, error) {
 }
 
 func (s *Service) closeThroughWorkflow(ctx context.Context, open bill) (bill, error) {
-	updateErr := s.updateBill(ctx, open, client.UpdateWorkflowOptions{UpdateName: billflow.UpdateClose}, nil)
+	updateErr := s.updateBill(ctx, billWorkflowParams(open), client.UpdateWorkflowOptions{UpdateName: billflow.UpdateClose}, nil)
 
 	// The update also fails when the bill closed on its own in the meantime
 	// and the workflow is gone, so the stored bill decides the outcome.
@@ -241,6 +241,14 @@ func (s *Service) closeThroughWorkflow(ctx context.Context, open bill) (bill, er
 		updateErr = errors.New("bill is still open after its close completed")
 	}
 	return bill{}, errs.WrapCode(updateErr, errs.Unavailable, "close bill")
+}
+
+func (s *Service) findBillState(ctx context.Context, id string) (billState, error) {
+	st, err := s.store.billState(ctx, id)
+	if errors.Is(err, errBillNotFound) {
+		return billState{}, &errs.Error{Code: errs.NotFound, Message: "bill not found"}
+	}
+	return st, err
 }
 
 func (s *Service) findBill(ctx context.Context, id string) (bill, error) {

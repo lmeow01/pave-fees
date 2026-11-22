@@ -114,6 +114,27 @@ func (s store) bill(ctx context.Context, id string) (bill, error) {
 	return b, err
 }
 
+// billState is what a write to a bill needs to know: whether it is open, and
+// the values its workflow runs with. Unlike bill it carries no total, so
+// reading it does not sum the bill's line items.
+type billState struct {
+	Status   string
+	Workflow billflow.Params
+}
+
+func (s store) billState(ctx context.Context, id string) (billState, error) {
+	st := billState{}
+	err := s.db.QueryRow(ctx, `SELECT id, currency, status, period_end FROM bills WHERE id = $1`, id).
+		Scan(&st.Workflow.BillID, &st.Workflow.Currency, &st.Status, &st.Workflow.PeriodEnd)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return billState{}, errBillNotFound
+	}
+	if err != nil {
+		return billState{}, fmt.Errorf("query bill state: %w", err)
+	}
+	return st, nil
+}
+
 // billsFilter selects a customer's bills. An empty Status matches every
 // status, and an empty Before starts from the newest bill.
 type billsFilter struct {
