@@ -26,6 +26,11 @@ jobs:
           curl -L https://encore.dev/install.sh | bash
           echo "$HOME/.encore/bin" >> "$GITHUB_PATH"
 
+      # Encore gives its Postgres container a fixed time to start, and a cold
+      # image pull on a fresh runner uses that time up.
+      - name: Pull Encore's Postgres image
+        run: docker pull encoredotdev/postgres:18
+
       - run: task build
       - run: task lint
       - run: task test
