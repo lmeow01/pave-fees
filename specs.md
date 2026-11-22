@@ -368,12 +368,26 @@ What Temporal provides here:
 Because the stored total is computed from the stored line items, the two
 cannot disagree.
 
-**Defence in depth in Postgres** (`fees/store.go`). The workflow is the
-guard, but an activity attempt that timed out can in principle still commit
-late. So the insert takes a share lock on the bill row and only inserts if the
-bill is open, and the close takes the exclusive lock before summing in a
-second statement. Even a stray insert either commits before the total is
-computed or finds the bill closed. This relies on Postgres's default READ
+**Defence in depth in Postgres** (`fees/store.go`). With one workflow run per
+bill, the workflow alone keeps inserts and the close apart: it closes only
+after every insert it started has finished, and a retried insert is absorbed
+by the idempotency key. The database guard is for the cases where that
+assumption breaks:
+
+- **Two runs for one bill.** An operator terminates or resets a workflow
+  while an insert is in progress, and the next request starts a new run. The
+  new run knows nothing of that insert and may close while it is still being
+  written.
+- **A new run for a closed bill.** A run's status starts as open; it is not
+  read from the database. A run started after the bill closed would accept
+  line items.
+- **A future bug or another writer.** A change that drops the wait for
+  in-progress inserts, or any code that writes outside the workflow.
+
+So the insert takes a share lock on the bill row and only inserts if the bill
+is open, and the close takes the exclusive lock before summing in a second
+statement. An insert either commits before the total is computed or finds
+the bill closed, whoever sent it. This relies on Postgres's default READ
 COMMITTED isolation, where the summing statement sees everything committed
 before it started.
 
@@ -533,7 +547,7 @@ is ceremony.
 
 Not covered by tests: continue-as-new (the test environment cannot trigger
 Temporal's suggestion), and the Postgres row locks as an independent guard
-(the workflow already orders the writes, so the tests never reach a late
-commit). Both were reviewed by reading, not by execution.
+(the workflow already orders the writes, so the tests never have an insert
+overlapping a close). Both were reviewed by reading, not by execution.
 
 CI runs `task build`, `task lint` and `task test` on pushes to `main` and on pull requests.
