@@ -1,0 +1,41 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Build, lint and test
+    cmds:
+      - task: build
+      - task: lint
+      - task: test
+
+  build:
+    desc: Compile the app and validate its Encore API definitions
+    cmds:
+      - scripts/with-temporal.sh encore check < /dev/null
+
+  lint:
+    desc: Run golangci-lint and Temporal's workflow determinism check
+    cmds:
+      - go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+      - go tool workflowcheck ./fees/billflow/...
+
+  test-unit:
+    desc: Run the tests that need no infrastructure (money, workflow), with the race detector
+    cmds:
+      - go test -race -count=1 ./fees/money/... ./fees/billflow/...
+
+  test:
+    desc: Run all tests (needs Docker; starts a Temporal dev server if none is running)
+    cmds:
+      - task: test-unit
+      - scripts/with-temporal.sh encore test -count=1 ./...
+
+  temporal:
+    desc: Start a Temporal dev server with its UI on http://localhost:8233
+    cmds:
+      - temporal server start-dev
+
+  run:
+    desc: Run the API locally (needs Docker and `task temporal` in another terminal)
+    cmds:
+      - encore run

@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - unparam
+  exclusions:
+    rules:
+      # Encore calls initService from code it generates at compile time, so
+      # the linter cannot see that it, and what only it uses, is reachable.
+      - linters: [unused]
+        text: "(func initService|var cfg|var db) is unused"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/lmeow01/pave-fees
