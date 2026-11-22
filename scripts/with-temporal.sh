@@ -2,6 +2,10 @@
 # Runs a command with a Temporal dev server available on localhost:7233.
 # Reuses a server that is already running; otherwise starts an in-memory one
 # and stops it when the command exits.
+#
+# The server it starts suggests continue-as-new after 40 history events
+# (the default is 4096), so that the tests exercise bills whose workflow
+# rolls over to a new run.
 set -euo pipefail
 
 temporal_is_up() {
@@ -9,7 +13,8 @@ temporal_is_up() {
 }
 
 if ! temporal_is_up; then
-	temporal server start-dev --headless --log-level error &
+	temporal server start-dev --headless --log-level error \
+		--dynamic-config-value limit.historyCount.suggestContinueAsNew=40 &
 	server_pid=$!
 	trap 'kill "$server_pid"' EXIT
 

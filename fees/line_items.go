@@ -110,18 +110,36 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 		return stored, nil
 	case billflow.IsCurrencyMismatch(err):
 		return billflow.LineItem{}, invalidArgument("currency does not match the bill's currency " + string(b.Currency))
-	case billflow.IsBillClosed(err):
-		return billflow.LineItem{}, errBillClosed()
 	case billflow.IsPermanentFailure(err):
 		return billflow.LineItem{}, errs.WrapCode(err, errs.Internal, "add line item")
 	}
+	return s.addOutcomeFromRecord(ctx, billID, item.IdempotencyKey, err)
+}
 
-	// The update also fails when the bill closed after it was read above and
-	// the workflow is gone, so the stored bill decides the outcome.
-	if current, findErr := s.findBill(ctx, billID); findErr == nil && current.Status == statusClosed {
+// addOutcomeFromRecord decides what a failed update means for the caller.
+// The update's answer can be lost after its line item was stored, for example
+// when the workflow rolls over to a new run or completes while the caller is
+// still waiting, so the stored records decide and not the error alone.
+func (s *Service) addOutcomeFromRecord(ctx context.Context, billID, idempotencyKey string, updateErr error) (billflow.LineItem, error) {
+	unavailable := errs.WrapCode(updateErr, errs.Unavailable, "add line item")
+
+	// The bill is read before the line item: once the bill is closed nothing
+	// more can be stored on it, so the lookup that follows is final.
+	b, err := s.findBill(ctx, billID)
+	if err != nil {
+		return billflow.LineItem{}, unavailable
+	}
+	stored, found, err := s.store.lineItemByKey(ctx, billID, idempotencyKey)
+	if err != nil {
+		return billflow.LineItem{}, err
+	}
+	switch {
+	case found:
+		return stored, nil
+	case b.Status == statusClosed || billflow.IsBillClosed(updateErr):
 		return billflow.LineItem{}, errBillClosed()
 	}
-	return billflow.LineItem{}, errs.WrapCode(err, errs.Unavailable, "add line item")
+	return billflow.LineItem{}, unavailable
 }
 
 // ListLineItemsParams is the request of ListLineItems.

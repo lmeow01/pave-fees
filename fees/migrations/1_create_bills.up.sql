@@ -18,6 +18,9 @@ CREATE TABLE bills (
     UNIQUE (id, currency)
 );
 
+-- A customer's bills are listed and paged by ID, which is time-ordered.
+CREATE INDEX bills_by_customer ON bills (customer_id, id);
+
 CREATE TABLE line_items (
     id              TEXT PRIMARY KEY,
     bill_id         TEXT        NOT NULL,
@@ -31,6 +34,5 @@ CREATE TABLE line_items (
     UNIQUE (bill_id, idempotency_key)
 );
 
--- Both lists are paged by ID, which is time-ordered.
+-- A bill's line items are listed and paged by ID, which is time-ordered.
 CREATE INDEX line_items_by_bill ON line_items (bill_id, id);
-CREATE INDEX bills_by_customer ON bills (customer_id, id);

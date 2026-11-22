@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/lmeow01/pave-fees/fees/billflow"
 	"github.com/lmeow01/pave-fees/fees/money"
@@ -31,10 +32,15 @@ type fakeStore struct {
 	itemsAtClose int
 	insertDelay  time.Duration
 	insertErr    error
+	// duringInsert runs while a line item is being written.
+	duringInsert func()
 }
 
 func (s *fakeStore) InsertLineItem(_ context.Context, item billflow.LineItem) (billflow.LineItem, error) {
 	time.Sleep(s.insertDelay)
+	if s.duringInsert != nil {
+		s.duringInsert()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.insertErr != nil {
@@ -245,4 +251,24 @@ func TestStoreRefusalSurfacesAsBillClosed(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, billflow.IsBillClosed(err))
 	assert.True(t, errors.Is(err, billflow.ErrBillNotOpen))
+}
+
+func TestBillAnswersAnAddInFlightBeforeContinuingAsNew(t *testing.T) {
+	bt := newBillTest(t)
+	bt.store.duringInsert = func() { bt.env.SetContinueAsNewSuggested(true) }
+	added := bt.add(usdItem("k1"))
+
+	bt.env.ExecuteWorkflow(billflow.Bill, billflow.Params{
+		BillID:    "bill_1",
+		Currency:  money.USD,
+		PeriodEnd: periodEnd,
+	})
+
+	require.True(t, bt.env.IsWorkflowCompleted())
+	var continued *workflow.ContinueAsNewError
+	require.ErrorAs(t, bt.env.GetWorkflowError(), &continued)
+	require.True(t, added.completed, "the add is answered by the run that accepted it")
+	require.NoError(t, added.err)
+	assert.Len(t, bt.store.items, 1)
+	assert.True(t, bt.store.closedAt.IsZero(), "rolling over does not close the bill")
 }

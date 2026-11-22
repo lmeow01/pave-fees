@@ -3,11 +3,11 @@ package fees
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"encore.dev/storage/sqldb"
-	"github.com/reconquest/karma-go"
 
 	"github.com/lmeow01/pave-fees/fees/billflow"
 	"github.com/lmeow01/pave-fees/fees/money"
@@ -82,7 +82,7 @@ func (s store) billByKey(ctx context.Context, idempotencyKey string) (bill, bool
 		return bill{}, false, nil
 	}
 	if err != nil {
-		return bill{}, false, karma.Format(err, "query bill by idempotency key")
+		return bill{}, false, fmt.Errorf("query bill by idempotency key: %w", err)
 	}
 	return b, true, nil
 }
@@ -97,11 +97,11 @@ func (s store) createBill(ctx context.Context, nb newBill) (bill, error) {
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		nb.ID, nb.CustomerID, nb.Currency, nb.PeriodEnd, nb.IdempotencyKey)
 	if err != nil {
-		return bill{}, karma.Format(err, "insert bill")
+		return bill{}, fmt.Errorf("insert bill: %w", err)
 	}
 	b, err := scanBill(s.db.QueryRow(ctx, selectBill+` WHERE idempotency_key = $1`, nb.IdempotencyKey))
 	if err != nil {
-		return bill{}, karma.Format(err, "read back bill")
+		return bill{}, fmt.Errorf("read back bill: %w", err)
 	}
 	return b, nil
 }
@@ -109,7 +109,7 @@ func (s store) createBill(ctx context.Context, nb newBill) (bill, error) {
 func (s store) bill(ctx context.Context, id string) (bill, error) {
 	b, err := scanBill(s.db.QueryRow(ctx, selectBill+` WHERE id = $1`, id))
 	if err != nil && !errors.Is(err, errBillNotFound) {
-		return bill{}, karma.Format(err, "query bill")
+		return bill{}, fmt.Errorf("query bill: %w", err)
 	}
 	return b, err
 }
@@ -138,7 +138,7 @@ func (s store) bills(ctx context.Context, f billsFilter, limit int) ([]bill, err
 		LIMIT $3`,
 		args...)
 	if err != nil {
-		return nil, karma.Format(err, "query bills")
+		return nil, fmt.Errorf("query bills: %w", err)
 	}
 	defer rows.Close()
 
@@ -146,12 +146,12 @@ func (s store) bills(ctx context.Context, f billsFilter, limit int) ([]bill, err
 	for rows.Next() {
 		b, err := scanBill(rows)
 		if err != nil {
-			return nil, karma.Format(err, "scan bill")
+			return nil, fmt.Errorf("scan bill: %w", err)
 		}
 		bills = append(bills, b)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, karma.Format(err, "read bills")
+		return nil, fmt.Errorf("read bills: %w", err)
 	}
 	return bills, nil
 }
@@ -176,7 +176,7 @@ func (s store) lineItems(ctx context.Context, billID, after string, limit int) (
 		LIMIT $3`,
 		billID, after, limit)
 	if err != nil {
-		return nil, karma.Format(err, "query line items")
+		return nil, fmt.Errorf("query line items: %w", err)
 	}
 	defer rows.Close()
 
@@ -184,12 +184,12 @@ func (s store) lineItems(ctx context.Context, billID, after string, limit int) (
 	for rows.Next() {
 		li, err := scanLineItem(rows)
 		if err != nil {
-			return nil, karma.Format(err, "scan line item")
+			return nil, fmt.Errorf("scan line item: %w", err)
 		}
 		items = append(items, li)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, karma.Format(err, "read line items")
+		return nil, fmt.Errorf("read line items: %w", err)
 	}
 	return items, nil
 }
@@ -203,7 +203,7 @@ func (s store) lineItemByKey(ctx context.Context, billID, idempotencyKey string)
 		return billflow.LineItem{}, false, nil
 	}
 	if err != nil {
-		return billflow.LineItem{}, false, karma.Format(err, "query line item by idempotency key")
+		return billflow.LineItem{}, false, fmt.Errorf("query line item by idempotency key: %w", err)
 	}
 	return li, true, nil
 }
@@ -222,15 +222,15 @@ func (s store) InsertLineItem(ctx context.Context, item billflow.LineItem) (bill
 		ON CONFLICT (bill_id, idempotency_key) DO NOTHING`,
 		item.ID, item.BillID, item.Description, item.Amount, item.Currency, item.CreatedAt, item.IdempotencyKey)
 	if isDataError(err) {
-		return billflow.LineItem{}, karma.Format(errors.Join(billflow.ErrPermanent, err), "insert line item")
+		return billflow.LineItem{}, fmt.Errorf("%w: insert line item: %w", billflow.ErrPermanent, err)
 	}
 	if err != nil {
-		return billflow.LineItem{}, karma.Format(err, "insert line item")
+		return billflow.LineItem{}, fmt.Errorf("insert line item: %w", err)
 	}
 
 	stored, found, err := s.lineItemByKey(ctx, item.BillID, item.IdempotencyKey)
 	if err != nil {
-		return billflow.LineItem{}, karma.Format(err, "read back line item")
+		return billflow.LineItem{}, fmt.Errorf("read back line item: %w", err)
 	}
 	if !found {
 		return billflow.LineItem{}, billflow.ErrBillNotOpen
@@ -256,17 +256,17 @@ func isDataError(err error) bool {
 func (s store) CloseBill(ctx context.Context, billID string, closedAt time.Time) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return karma.Format(err, "begin close")
+		return fmt.Errorf("begin close: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	var locked string
 	err = tx.QueryRow(ctx, `SELECT id FROM bills WHERE id = $1 FOR UPDATE`, billID).Scan(&locked)
 	if errors.Is(err, sqldb.ErrNoRows) {
-		return karma.Format(errors.Join(billflow.ErrPermanent, errBillNotFound), "close bill %s", billID)
+		return fmt.Errorf("%w: close bill %s: %w", billflow.ErrPermanent, billID, errBillNotFound)
 	}
 	if err != nil {
-		return karma.Format(err, "lock bill")
+		return fmt.Errorf("lock bill: %w", err)
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -277,10 +277,10 @@ func (s store) CloseBill(ctx context.Context, billID string, closedAt time.Time)
 		WHERE id = $1 AND status = 'open'`,
 		billID, closedAt)
 	if err != nil {
-		return karma.Format(err, "close bill")
+		return fmt.Errorf("close bill: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return karma.Format(err, "commit close")
+		return fmt.Errorf("commit close: %w", err)
 	}
 	return nil
 }

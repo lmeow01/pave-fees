@@ -4,10 +4,10 @@ package fees
 
 import (
 	"context"
+	"fmt"
 
 	"encore.dev"
 	"encore.dev/config"
-	"github.com/reconquest/karma-go"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
@@ -42,7 +42,7 @@ func initService() (*Service, error) {
 		Namespace: cfg.TemporalNamespace(),
 	})
 	if err != nil {
-		return nil, karma.Format(err, "dial temporal")
+		return nil, fmt.Errorf("dial temporal: %w", err)
 	}
 
 	st := store{db: db}
@@ -51,7 +51,7 @@ func initService() (*Service, error) {
 	w.RegisterActivity(&billflow.Activities{Store: st})
 	if err := w.Start(); err != nil {
 		c.Close()
-		return nil, karma.Format(err, "start temporal worker")
+		return nil, fmt.Errorf("start temporal worker: %w", err)
 	}
 
 	return &Service{temporal: c, worker: w, store: st}, nil

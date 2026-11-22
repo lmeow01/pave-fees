@@ -321,14 +321,26 @@ is rejected. A customer who owes fees in both GEL and USD has two bills.
   `(bill_id, currency) -> bills (id, currency)` makes a mismatch impossible
   to store.
 
-**If mixed-currency bills were required:** convert at accrual, never at
-close. Each line item would store the original amount and currency, the rate,
-the rate's timestamp and source, and the converted amount in the bill's
-currency. The total is then still a sum of stored integers, and an old bill
-can always be explained. Converting at close would make the total depend on
-when the bill happened to close.
+**Follow-up: line items in several currencies on one bill.** Not built; this
+is how it would be:
+
+- Each line item is stored in its original currency and amount, as today,
+  with no conversion applied to what is stored.
+- Each line item also records the FX rate to the bill's currency at the
+  moment it was accrued, with the rate's timestamp and source.
+- The total in the bill's currency is computed from those stored amounts and
+  rates when the bill is read, and written once at close.
+
+The rate is recorded at accrual and not looked up when the total is asked
+for, so that the same bill always gives the same total: a closed bill is a
+charge, and its amount cannot move with the market after the fact. Rounding
+(per line item or once on the total) is a policy decision to settle with
+finance before building it.
 
 ### 6.3 Why a workflow, and why Updates
+
+Temporal owns the bill's lifecycle and the order of writes to it; Postgres
+owns the data.
 
 The hard requirement is F4/N2: a line item must never land on a bill after
 it was closed, and a close must never miss a line item that was accepted.
@@ -462,10 +474,25 @@ Every line item adds events to the workflow history, and Temporal caps a
 history at about 50,000 events, and by default a single run at 2,000 updates
 (Temporal suggests continuing as new at 90% of that). When Temporal suggests
 it, and no update is mid-flight, the workflow continues as new with the same
-parameters. The
-state it carries is tiny (bill ID, currency, period end) because line items
-live in Postgres, not in workflow memory. The idempotency keys also live in
-Postgres, so deduplication survives the rollover.
+parameters. The state it carries is tiny (bill ID, currency, period end)
+because line items live in Postgres, not in workflow memory. The idempotency
+keys also live in Postgres, so deduplication survives the rollover.
+
+**The answer to an add can be lost; the line item cannot.** A caller waiting
+on an update can be left without its answer when the run it was sent to ends
+underneath it, by rolling over or by closing. The line item may already be
+stored. So when an update fails, the handler does not conclude from the
+error: it reads the bill and then looks for the line item by idempotency key.
+Found means success. Not found on a closed bill means "bill is closed", and
+that is final because nothing more can be stored on a closed bill. Otherwise
+the caller gets `503` and retries with the same key.
+
+This was found by testing, not by reading: the test Temporal server suggests
+continue-as-new after 40 events (`scripts/with-temporal.sh`), so every test
+bill with more than a handful of line items rolls over. Before the handler
+read the record, the test that races adds against a close failed about one
+run in five, with line items charged whose callers had been told "bill is
+closed".
 
 ### 6.7 Scale and limits
 
@@ -537,7 +564,7 @@ shape is the same in both cases:
 | Layer | What | Where |
 |---|---|---|
 | Unit | Amount and currency parsing | `fees/money` |
-| Workflow | Add, reject by currency, close, auto-close at period end, reject after close, close waits for in-flight adds, a retried add is stored once, a permanently failing write does not block the close | `fees/billflow`, Temporal test environment with a fake store and skipped time |
+| Workflow | Add, reject by currency, close, auto-close at period end, reject after close, close waits for in-flight adds, a retried add is stored once, a permanently failing write does not block the close, an add in flight is answered before the workflow continues as new | `fees/billflow`, Temporal test environment with a fake store and skipped time |
 | Integration | Full lifecycle through the endpoints, idempotent replays (including a create retried after the bill closed), validation, 404s, real period-end timer, 40 concurrent adds racing a close, paging through line items and bills, a bill without a workflow repaired by the next add or close, the store marking refused data as permanent, and server-side failures hidden from the caller | `fees/api_test.go`, `fees/store_test.go`, real Postgres and Temporal |
 | Static | `golangci-lint`, `workflowcheck` (determinism) | `task lint` |
 
@@ -545,9 +572,14 @@ Tests were written first for `money` and the workflow, where the rules are.
 The endpoint tests came after the endpoints: test-first on framework wiring
 is ceremony.
 
-Not covered by tests: continue-as-new (the test environment cannot trigger
-Temporal's suggestion), and the Postgres row locks as an independent guard
-(the workflow already orders the writes, so the tests never have an insert
-overlapping a close). Both were reviewed by reading, not by execution.
+Continue-as-new runs in every integration run, because the test server
+suggests it after 40 history events. One test writes 100 line items from four
+writers through several rollovers and checks the total; the race test has
+every writer adding until it is refused, and checks that the closed bill
+charges exactly the accepted line items.
+
+Not covered by tests: the Postgres row locks as an independent guard (the
+workflow already orders the writes, so the tests never have an insert
+overlapping a close). That was reviewed by reading, not by execution.
 
 CI runs `task build`, `task lint` and `task test` on pushes to `main` and on pull requests.

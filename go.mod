@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	encore.dev v1.57.13
 	github.com/google/uuid v1.6.0
-	github.com/reconquest/karma-go v1.5.0
 	github.com/stretchr/testify v1.12.1
 	go.temporal.io/api v1.64.3
 	go.temporal.io/sdk v1.51.0

@@ -103,7 +103,10 @@ task test-unit  # money and workflow tests with the race detector; needs nothing
 ```
 
 `task build` and `task test` start an in-memory Temporal dev server for the
-run if none is listening on `localhost:7233`, and stop it afterwards.
+run if none is listening on `localhost:7233`, and stop it afterwards. That
+server is told to suggest continue-as-new after 40 history events, so the
+tests cover bills whose workflow rolls over to a new run. Tests run against
+your own `task temporal` server pass too, but do not exercise the rollover.
 
 The end-to-end tests run without `-race`: the race detector crashes at startup
 under the Go toolchain bundled with the Encore CLI v1.58.9. The workflow and money

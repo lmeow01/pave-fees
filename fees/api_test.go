@@ -259,39 +259,50 @@ func TestBillClosesItselfAtPeriodEnd(t *testing.T) {
 	requireCode(t, errs.FailedPrecondition, err)
 }
 
-// Many writers add line items while the bill is being closed. Whatever the
-// interleaving, the closed bill must charge exactly the line items whose
-// callers were told they were accepted.
+// Many writers keep adding line items while the bill is being closed.
+// Whatever the interleaving, the closed bill must charge exactly the line
+// items whose callers were told they were accepted.
 func TestConcurrentAddsRacingClose(t *testing.T) {
 	ctx := context.Background()
 	bill := openBill(t, "USD")
 
-	const writers = 40
+	const writers = 16
 	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		accepted = map[string]int64{}
+		wg            sync.WaitGroup
+		mu            sync.Mutex
+		accepted      = map[string]int64{}
+		refused       int
+		firstAccepted = make(chan struct{})
+		announce      sync.Once
 	)
-	for i := range writers {
-		amount := int64(i + 1)
+	for w := range writers {
 		wg.Go(func() {
-			item, err := AddLineItem(ctx, bill.ID, fee(strconv.FormatInt(amount, 10), "USD"))
-			if err != nil {
-				assert.Equal(t, errs.FailedPrecondition, errs.Code(err), "unexpected error: %v", err)
-				return
+			// Each writer adds until the bill refuses it, so every writer is
+			// mid-request when the close lands.
+			for n := 1; ; n++ {
+				amount := int64(w*1000 + n)
+				item, err := AddLineItem(ctx, bill.ID, fee(strconv.FormatInt(amount, 10), "USD"))
+				if err != nil {
+					assert.Equal(t, errs.FailedPrecondition, errs.Code(err), "unexpected error: %v", err)
+					mu.Lock()
+					refused++
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				accepted[item.ID] = amount
+				mu.Unlock()
+				announce.Do(func() { close(firstAccepted) })
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			accepted[item.ID] = amount
 		})
-		if i == writers/2 {
-			wg.Go(func() {
-				_, err := CloseBill(ctx, bill.ID)
-				assert.NoError(t, err)
-			})
-		}
 	}
+	<-firstAccepted
+	_, err := CloseBill(ctx, bill.ID)
+	require.NoError(t, err)
 	wg.Wait()
+
+	require.NotEmpty(t, accepted, "no line item was accepted before the close")
+	require.Equal(t, writers, refused, "every writer ends by being refused")
 
 	closed, err := GetBill(ctx, bill.ID)
 	require.NoError(t, err)
@@ -301,15 +312,49 @@ func TestConcurrentAddsRacingClose(t *testing.T) {
 	for _, amount := range accepted {
 		wantTotal += amount
 	}
-	charged := map[string]bool{}
-	for _, li := range closed.LineItems.Data {
-		charged[li.ID] = true
-	}
 	assert.Equal(t, strconv.FormatInt(wantTotal, 10), closed.TotalAmount)
+
+	charged := map[string]bool{}
+	token := ""
+	for {
+		page, err := ListLineItems(ctx, bill.ID, &ListLineItemsParams{PageSize: maxPageSize, NextPageToken: token})
+		require.NoError(t, err)
+		for _, li := range page.Data {
+			charged[li.ID] = true
+		}
+		if token = page.NextPageToken; token == "" {
+			break
+		}
+	}
 	assert.Len(t, charged, len(accepted))
 	for id := range accepted {
 		assert.True(t, charged[id], "accepted line item %s is missing from the closed bill", id)
 	}
+}
+
+// The test Temporal server suggests continue-as-new after a few dozen
+// history events (scripts/with-temporal.sh), so this bill's workflow rolls
+// over to a new run several times while it is being written to.
+func TestBillKeepsAccruingAcrossWorkflowRollovers(t *testing.T) {
+	ctx := context.Background()
+	bill := openBill(t, "USD")
+
+	const writers, itemsPerWriter = 4, 25
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			for range itemsPerWriter {
+				_, err := AddLineItem(ctx, bill.ID, fee("10", "USD"))
+				assert.NoError(t, err)
+			}
+		})
+	}
+	wg.Wait()
+
+	closed, err := CloseBill(ctx, bill.ID)
+	require.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(writers*itemsPerWriter*10), closed.TotalAmount)
+	assert.Len(t, closed.LineItems.Data, writers*itemsPerWriter)
 }
 
 func TestLineItemsArePaged(t *testing.T) {
