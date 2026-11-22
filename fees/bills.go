@@ -112,11 +112,20 @@ func (s *Service) startBillWorkflow(ctx context.Context, b bill) error {
 	return err
 }
 
+// updateWaitLimit bounds how long a request waits for the bill's workflow to
+// answer, for example while Postgres is down and the workflow's activities
+// are retrying. The caller then gets 503 and retries with the same
+// Idempotency-Key.
+var updateWaitLimit = 30 * time.Second
+
 // updateBill sends an update to the bill's workflow, starting the workflow
 // first if it is not running. That repairs a bill whose workflow was never
 // started (CreateBill failed between its two steps and was not retried) or
 // was terminated.
 func (s *Service) updateBill(ctx context.Context, params billflow.Params, update client.UpdateWorkflowOptions, result any) error {
+	ctx, cancel := context.WithTimeout(ctx, updateWaitLimit)
+	defer cancel()
+
 	update.WorkflowID = params.BillID
 	update.WaitForStage = client.WorkflowUpdateStageCompleted
 	handle, err := s.temporal.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
@@ -218,19 +227,19 @@ func (s *Service) CloseBill(ctx context.Context, id string) (*Bill, error) {
 		return nil, err
 	}
 	if b.Status == statusOpen {
-		if b, err = s.closeThroughWorkflow(ctx, b); err != nil {
+		if b, err = s.closeThroughWorkflow(ctx, billWorkflowParams(b)); err != nil {
 			return nil, err
 		}
 	}
 	return s.billResponse(ctx, b)
 }
 
-func (s *Service) closeThroughWorkflow(ctx context.Context, open bill) (bill, error) {
-	updateErr := s.updateBill(ctx, billWorkflowParams(open), client.UpdateWorkflowOptions{UpdateName: billflow.UpdateClose}, nil)
+func (s *Service) closeThroughWorkflow(ctx context.Context, open billflow.Params) (bill, error) {
+	updateErr := s.updateBill(ctx, open, client.UpdateWorkflowOptions{UpdateName: billflow.UpdateClose}, nil)
 
 	// The update also fails when the bill closed on its own in the meantime
 	// and the workflow is gone, so the stored bill decides the outcome.
-	b, err := s.findBill(ctx, open.ID)
+	b, err := s.findBill(ctx, open.BillID)
 	if err != nil {
 		return bill{}, err
 	}

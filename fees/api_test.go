@@ -546,3 +546,74 @@ func TestServerSideFailureDoesNotReachTheCaller(t *testing.T) {
 	assert.NotContains(t, err.Error(), "query bill")
 	assert.NotContains(t, err.Error(), "context canceled")
 }
+
+// stuckBill is a bill whose workflow makes no progress: its run waits on a
+// task queue that no worker polls. Writes to it wait at most a second. The
+// returned function ends the stuck run and restores the wait limit; it also
+// runs when the test ends.
+func stuckBill(t *testing.T, periodEnd time.Time) (string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	limit := updateWaitLimit
+	updateWaitLimit = time.Second
+
+	id := billWithoutWorkflow(t, periodEnd)
+	c, err := client.Dial(client.Options{HostPort: cfg.TemporalHostPort(), Namespace: cfg.TemporalNamespace()})
+	require.NoError(t, err)
+	stuck := billWorkflowOptions(id)
+	stuck.TaskQueue = "unpolled"
+	_, err = c.ExecuteWorkflow(ctx, stuck, "Bill")
+	require.NoError(t, err)
+
+	var once sync.Once
+	unstick := func() {
+		once.Do(func() {
+			updateWaitLimit = limit
+			assert.NoError(t, c.TerminateWorkflow(ctx, id, "", "test"))
+			c.Close()
+		})
+	}
+	t.Cleanup(unstick)
+	return id, unstick
+}
+
+func TestOverdueBillsAreClosedBySweep(t *testing.T) {
+	ctx := context.Background()
+	overdue := billWithoutWorkflow(t, time.Now().Add(-time.Hour))
+	_, err := store{db: db}.InsertLineItem(ctx, usdLineItem(overdue))
+	require.NoError(t, err)
+	notYetDue := billWithoutWorkflow(t, time.Now().Add(time.Hour))
+	stuck, _ := stuckBill(t, time.Now().Add(-2*time.Hour))
+
+	swept, err := CloseOverdueBills(ctx)
+	require.NoError(t, err)
+
+	assert.Contains(t, swept.Failed, stuck, "a bill that cannot close is reported")
+	assert.Contains(t, swept.Closed, overdue, "and does not hold up the bills behind it")
+	assert.NotContains(t, swept.Closed, notYetDue)
+	closed, err := GetBill(ctx, overdue)
+	require.NoError(t, err)
+	assert.Equal(t, "closed", closed.Status)
+	assert.Equal(t, "100", closed.TotalAmount)
+	stillOpen, err := GetBill(ctx, notYetDue)
+	require.NoError(t, err)
+	assert.Equal(t, "open", stillOpen.Status)
+}
+
+func TestWriteToStuckBillIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	id, unstick := stuckBill(t, time.Now().Add(time.Hour))
+
+	add := fee("700", "USD")
+	_, err := AddLineItem(ctx, id, add)
+	requireCode(t, errs.Unavailable, err)
+	_, err = CloseBill(ctx, id)
+	requireCode(t, errs.Unavailable, err)
+
+	unstick()
+	_, err = AddLineItem(ctx, id, add)
+	require.NoError(t, err, "a retry with the same key succeeds once the bill's workflow runs again")
+	closed, err := CloseBill(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "700", closed.TotalAmount)
+}

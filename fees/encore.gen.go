@@ -48,6 +48,15 @@ func ListLineItems(ctx context.Context, id string, p *ListLineItemsParams) (*Lin
 	return (*LineItemList)(nil), nil
 }
 
+// CloseOverdueBills closes open bills more than a few minutes past their
+// period end. A bill whose workflow was never started, and that nobody wrote
+// to since, is closed by nothing else. A bill that fails to close does not
+// hold up the bills behind it.
+func CloseOverdueBills(ctx context.Context) (*CloseOverdueBillsResponse, error) {
+	// The implementation is elided here, and generated at compile-time by Encore.
+	return (*CloseOverdueBillsResponse)(nil), nil
+}
+
 // Interface defines the service's API surface area, primarily for mocking purposes.
 //
 // Raw endpoints are currently excluded from this interface, as Encore does not yet
@@ -74,4 +83,10 @@ type Interface interface {
 
 	// ListLineItems returns a bill's line items, oldest first.
 	ListLineItems(ctx context.Context, id string, p *ListLineItemsParams) (*LineItemList, error)
+
+	// CloseOverdueBills closes open bills more than a few minutes past their
+	// period end. A bill whose workflow was never started, and that nobody wrote
+	// to since, is closed by nothing else. A bill that fails to close does not
+	// hold up the bills behind it.
+	CloseOverdueBills(ctx context.Context) (*CloseOverdueBillsResponse, error)
 }

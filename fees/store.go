@@ -135,6 +135,44 @@ func (s store) billState(ctx context.Context, id string) (billState, error) {
 	return st, nil
 }
 
+// overdueCursor selects open bills whose period ended before Before, and
+// continues after the bill (AfterPeriodEnd, AfterID) when AfterID is set.
+type overdueCursor struct {
+	Before         time.Time
+	AfterPeriodEnd time.Time
+	AfterID        string
+}
+
+// overdueBills returns up to limit open bills selected by the cursor, the
+// longest overdue first.
+func (s store) overdueBills(ctx context.Context, c overdueCursor, limit int) ([]billflow.Params, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, currency, period_end
+		FROM bills
+		WHERE status = 'open' AND period_end < $1
+		  AND ($3 = '' OR (period_end, id) > ($2, $3))
+		ORDER BY period_end, id
+		LIMIT $4`,
+		c.Before, c.AfterPeriodEnd, c.AfterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query overdue bills: %w", err)
+	}
+	defer rows.Close()
+
+	overdue := []billflow.Params{}
+	for rows.Next() {
+		var p billflow.Params
+		if err := rows.Scan(&p.BillID, &p.Currency, &p.PeriodEnd); err != nil {
+			return nil, fmt.Errorf("scan overdue bill: %w", err)
+		}
+		overdue = append(overdue, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read overdue bills: %w", err)
+	}
+	return overdue, nil
+}
+
 // billsFilter selects a customer's bills. An empty Status matches every
 // status, and an empty Before starts from the newest bill.
 type billsFilter struct {

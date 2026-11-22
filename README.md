@@ -100,7 +100,11 @@ task build      # compile the Encore app and check that it boots
 task lint       # golangci-lint and Temporal's workflow determinism check
 task test       # all tests; needs Docker
 task test-unit  # money and workflow tests with the race detector; needs nothing but Go
+task record-histories -- v2  # record workflow histories for the replay test
 ```
+
+`task record-histories` needs the Temporal server that `with-temporal.sh`
+starts, so stop your own `task temporal` server before running it.
 
 `task build` and `task test` start an in-memory Temporal dev server for the
 run if none is listening on `localhost:7233`, and stop it afterwards. That
@@ -121,9 +125,11 @@ on pushes to `main` and on pull requests.
 ```
 fees/
   money/        Currency and Amount (integer minor units), strict parsing
-  billflow/     Temporal workflow for one bill, its updates and activities
+  billflow/     Temporal workflow for one bill, its updates and activities;
+                testdata/ holds recorded histories the workflow must replay
   migrations/   Postgres schema
   service.go    Encore service: Temporal client and worker
+  overdue.go    Cron sweep that closes bills whose workflow never started
   bills.go      Create, list, get and close endpoints
   line_items.go Add and list line item endpoints
   pagination.go Page size and page token rules

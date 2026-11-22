@@ -30,6 +30,11 @@ tasks:
       - task: test-unit
       - scripts/with-temporal.sh encore test -count=1 ./...
 
+  record-histories:
+    desc: Record Bill workflow histories for the replay test, e.g. `task record-histories -- v2`
+    cmds:
+      - scripts/with-temporal.sh scripts/record-workflow-histories.sh {{.CLI_ARGS}}
+
   temporal:
     desc: Start a Temporal dev server with its UI on http://localhost:8233
     cmds:

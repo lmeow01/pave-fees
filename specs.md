@@ -13,7 +13,7 @@ total when the period closes. Built on Encore (API, infrastructure), Temporal
 | F3 | Close a bill. The response states the total charged and the line items charged. Line items are paged: up to 100 in the response, the rest behind a page token (section 4, "Close"). |
 | F4 | Reject a line item once the bill is closed. |
 | F5 | Bills are in GEL or USD. |
-| F6 | A bill closes itself when its period ends, if nobody closed it earlier. |
+| F6 | A bill closes itself when its period ends, if nobody closed it earlier. A sweep closes any bill whose workflow was never started (6.5). |
 | F7 | Read a bill at any time, with its line items and the total accrued so far. |
 | F8 | Every write can be retried safely with an `Idempotency-Key`. |
 | F9 | List a customer's bills, and page through a bill's line items. |
@@ -204,7 +204,9 @@ Pagination is by cursor (keyset), not by offset: the token is the ID of the
 last row returned, and the next page is `WHERE id > token ORDER BY id LIMIT
 n` (`id < token ... DESC` for bills, which list newest first). An offset
 would re-scan every skipped row on each page. IDs are UUIDv7 generated when
-the request arrives, so ordering by ID is ordering by arrival time, and one
+the request arrives, so ordering by ID is ordering by arrival time at the
+API, close to but not exactly the order the workflow accepted them in
+(`created_at`), and one
 index per list (`(bill_id, id)`, `(customer_id, id)`) serves both the filter
 and the order. Clients must treat the token as opaque.
 
@@ -224,7 +226,7 @@ matters.
 | `Idempotency-Key` reused with a different payload | 400 | `invalid_argument` |
 | Line item added to a closed bill | 400 | `failed_precondition` |
 | Unknown bill | 404 | `not_found` |
-| Temporal unreachable | 503 | `unavailable` |
+| Temporal unreachable, or the bill's workflow did not answer an add or close within 30 s | 503 | `unavailable` |
 | Any other server-side failure | 500 or 503 | cause hidden, see below |
 
 A server-side failure never carries its cause to the caller. A middleware
@@ -412,6 +414,16 @@ text up front (bounded length, valid UTF-8, no control characters), and the
 store marks data errors (SQLSTATE classes 22 and 23) as permanent so the
 activity fails once and the caller gets an error.
 
+**Changing the workflow while bills are open.** A bill's workflow runs for
+a whole period, so a deploy replays histories that the previous code wrote.
+`fees/billflow/testdata` holds recorded histories (closed by request, closed
+by the timer, and a run that continued as new), and a replay test fails if
+the current code would take a different path through any of them. Recording
+the histories of each released version (`task record-histories -- v2`) and
+keeping the old ones is what makes this a guard and not a snapshot. A change
+that must alter the path, such as a charge step before `CloseBill`, goes
+behind `workflow.GetVersion` so that running bills keep their old path.
+
 **Determinism.** Workflow code uses `workflow.Now`, never the wall clock;
 IDs are generated in the API handler and passed in; all I/O is in activities.
 `workflowcheck` enforces this in `task lint`.
@@ -456,14 +468,29 @@ A caller that never retries leaves an open bill with no workflow. Add and
 close repair it: they use Temporal's *Update-With-Start*, one call that
 starts the workflow if it is not running and delivers the update to it. The
 workflow ID reuse policy only allows a new run after a failed or terminated
-one, so a bill whose workflow completed (a closed bill) is never reopened. A
+one, so a closed bill's workflow is not started again while Temporal still
+retains it. Past the namespace's retention a new run could start, but it
+cannot reopen the bill: its inserts and its close go through the row lock and
+the `status = 'open'` guard in Postgres (6.3), which refuse them. A
 workflow started after `period_end` rejects line items and closes at once.
 
-What remains: an orphaned bill that nobody touches again stays open past its
-`period_end`, because no timer is running for it. The production fix is a
-transactional outbox (write "start workflow" in the same transaction as the
-row, and have a relay deliver it) or a periodic reconciler for open bills
-without a workflow. I left that out.
+An orphaned bill that nobody touches again would stay open past its
+`period_end`, because no timer is running for it. A sweep closes it
+(`fees/overdue.go`): an Encore cron job calls a private endpoint every 10
+minutes, which pages through open bills more than 5 minutes past
+`period_end`, oldest first, and closes them ten at a time through the same
+Update-With-Start as `POST /close`. The grace period leaves bills with a
+running workflow to their own timer; the sweep also closes those if their
+timer is late, for example while the workers are down, which is harmless
+because a close is idempotent. A bill that fails to close is logged and
+listed in the response, and the sweep moves past it, so a few broken bills
+cannot hold up the rest. A sweep stops after 8 minutes, before the next one
+starts. Encore does not run cron jobs under `encore run`; the endpoint can be
+called directly.
+
+When nothing fails, an orphaned bill closes at most about 15 minutes after
+`period_end`, with the same total it would have had. A transactional outbox
+would close the gap at creation instead, at the cost of a relay process.
 
 The reverse order (workflow first, row written by an activity) removes that
 gap but means `POST /v1/bills` returns before the bill can be read, which is
@@ -506,8 +533,9 @@ closed".
   insert (tens of milliseconds). Temporal admits 10 in-flight updates per
   workflow by default and the SDK retries the rest, so one bill takes tens of
   line items per second, well above the assumed load. A bill under constant
-  concurrent writes may not find the idle moment it needs to continue as new;
-  that is the point at which to batch.
+  concurrent writes may not find the idle moment it needs to continue as new,
+  and once its run reaches Temporal's 2,000 updates, adds are refused with
+  `503` until it does; that is the point at which to batch.
 - **If one bill had to take thousands of writes per second:** have the
   workflow accept batches, or move accrual to direct inserts guarded by the
   row lock in 6.3 and keep the workflow for the lifecycle only.
@@ -522,7 +550,6 @@ closed".
 |---|---|
 | Authentication and ownership | See 6.9. |
 | One bill per customer, currency and period | A `period_start` and a unique constraint, so two callers cannot open overlapping bills. |
-| Auto-closing a bill whose workflow never started and that nobody writes to | Outbox or reconciler (6.5). |
 | Charging | A `charge` activity after `CloseBill`, with a `charged` state and the transaction ID on the bill. |
 | Credits and adjustments | Signed amounts with a `type` on the line item, and a floor of zero on the total. |
 | FX | Per-line-item rate snapshot (6.2). |
@@ -569,7 +596,8 @@ shape is the same in both cases:
 |---|---|---|
 | Unit | Amount and currency parsing | `fees/money` |
 | Workflow | Add, reject by currency, close, auto-close at period end, reject after close, close waits for in-flight adds, a retried add is stored once, a permanently failing write does not block the close | `fees/billflow`, Temporal test environment with a fake store and skipped time |
-| Integration | Full lifecycle through the endpoints, idempotent replays (including a create retried after the bill closed), validation, 404s, real period-end timer, concurrent writers adding until refused while the bill closes, 100 line items written across several workflow rollovers, paging through line items and bills, a bill without a workflow repaired by the next add or close, the store marking refused data as permanent, and server-side failures hidden from the caller | `fees/api_test.go`, `fees/store_test.go`, real Postgres and Temporal |
+| Replay | Recorded histories of earlier versions still replay against the current workflow | `fees/billflow/replay_test.go`, histories in `fees/billflow/testdata` |
+| Integration | Full lifecycle through the endpoints, idempotent replays (including a create retried after the bill closed), validation, 404s, real period-end timer, concurrent writers adding until refused while the bill closes, 100 line items written across several workflow rollovers, paging through line items and bills, a bill without a workflow repaired by the next add or close or closed by the overdue sweep, a stuck workflow answered with 503 and the retry succeeding once it runs again, the store marking refused data as permanent, and server-side failures hidden from the caller | `fees/api_test.go`, `fees/store_test.go`, real Postgres and Temporal |
 | Static | `golangci-lint`, `workflowcheck` (determinism) | `task lint` |
 
 Tests were written first for `money` and the workflow, where the rules are.
