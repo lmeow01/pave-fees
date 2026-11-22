@@ -224,7 +224,8 @@ matters.
 | `Idempotency-Key` reused with a different payload | 400 | `invalid_argument` |
 | Line item added to a closed bill | 400 | `failed_precondition` |
 | Unknown bill | 404 | `not_found` |
-| Temporal or Postgres unreachable | 503 | `unavailable` |
+| Temporal unreachable | 503 | `unavailable` |
+| Any other server-side failure | 500 or 503 | cause hidden, see below |
 
 A server-side failure never carries its cause to the caller. A middleware
 (`fees/middleware.go`) logs the full error and answers with the code and a
@@ -481,8 +482,11 @@ keys also live in Postgres, so deduplication survives the rollover.
 **The answer to an add can be lost; the line item cannot.** A caller waiting
 on an update can be left without its answer when the run it was sent to ends
 underneath it, by rolling over or by closing. The line item may already be
-stored. So when an update fails, the handler does not conclude from the
-error: it reads the bill and then looks for the line item by idempotency key.
+stored. So unless the error itself says what happened (wrong currency, data
+the store refused), the handler does not conclude from it: it reads the bill
+and then looks for the line item by idempotency key. The same check runs when
+a request finds the bill already closed, since its own earlier attempt may
+have stored the item just before.
 Found means success. Not found on a closed bill means "bill is closed", and
 that is final because nothing more can be stored on a closed bill. Otherwise
 the caller gets `503` and retries with the same key.
@@ -564,19 +568,21 @@ shape is the same in both cases:
 | Layer | What | Where |
 |---|---|---|
 | Unit | Amount and currency parsing | `fees/money` |
-| Workflow | Add, reject by currency, close, auto-close at period end, reject after close, close waits for in-flight adds, a retried add is stored once, a permanently failing write does not block the close, an add in flight is answered before the workflow continues as new | `fees/billflow`, Temporal test environment with a fake store and skipped time |
-| Integration | Full lifecycle through the endpoints, idempotent replays (including a create retried after the bill closed), validation, 404s, real period-end timer, 40 concurrent adds racing a close, paging through line items and bills, a bill without a workflow repaired by the next add or close, the store marking refused data as permanent, and server-side failures hidden from the caller | `fees/api_test.go`, `fees/store_test.go`, real Postgres and Temporal |
+| Workflow | Add, reject by currency, close, auto-close at period end, reject after close, close waits for in-flight adds, a retried add is stored once, a permanently failing write does not block the close | `fees/billflow`, Temporal test environment with a fake store and skipped time |
+| Integration | Full lifecycle through the endpoints, idempotent replays (including a create retried after the bill closed), validation, 404s, real period-end timer, concurrent writers adding until refused while the bill closes, 100 line items written across several workflow rollovers, paging through line items and bills, a bill without a workflow repaired by the next add or close, the store marking refused data as permanent, and server-side failures hidden from the caller | `fees/api_test.go`, `fees/store_test.go`, real Postgres and Temporal |
 | Static | `golangci-lint`, `workflowcheck` (determinism) | `task lint` |
 
 Tests were written first for `money` and the workflow, where the rules are.
 The endpoint tests came after the endpoints: test-first on framework wiring
 is ceremony.
 
-Continue-as-new runs in every integration run, because the test server
-suggests it after 40 history events. One test writes 100 line items from four
-writers through several rollovers and checks the total; the race test has
-every writer adding until it is refused, and checks that the closed bill
-charges exactly the accepted line items.
+Continue-as-new runs in CI and whenever `task test` starts its own Temporal
+server, which suggests it after 40 history events. One test writes 100 line
+items from four writers and checks the total, and in CI also asserts that
+the workflow did roll over to a new run; the race test has every writer adding until it is
+refused, and checks that the closed bill charges exactly the accepted line
+items. Against a Temporal server you started yourself the same tests pass
+without rolling over.
 
 Not covered by tests: the Postgres row locks as an independent guard (the
 workflow already orders the writes, so the tests never have an insert

@@ -2,6 +2,7 @@ package fees
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"encore.dev/beta/errs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/client"
 )
 
 // These tests run the real service through its endpoints: Postgres is
@@ -296,10 +298,19 @@ func TestConcurrentAddsRacingClose(t *testing.T) {
 			}
 		})
 	}
-	<-firstAccepted
+	writersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(writersDone)
+	}()
+	select {
+	case <-firstAccepted:
+	case <-writersDone:
+		t.Fatal("every writer was refused before any line item was accepted")
+	}
 	_, err := CloseBill(ctx, bill.ID)
 	require.NoError(t, err)
-	wg.Wait()
+	<-writersDone
 
 	require.NotEmpty(t, accepted, "no line item was accepted before the close")
 	require.Equal(t, writers, refused, "every writer ends by being refused")
@@ -332,12 +343,24 @@ func TestConcurrentAddsRacingClose(t *testing.T) {
 	}
 }
 
-// The test Temporal server suggests continue-as-new after a few dozen
-// history events (scripts/with-temporal.sh), so this bill's workflow rolls
-// over to a new run several times while it is being written to.
+// billRunID is the run currently executing the bill's workflow.
+func billRunID(t *testing.T, billID string) string {
+	t.Helper()
+	c, err := client.Dial(client.Options{HostPort: cfg.TemporalHostPort(), Namespace: cfg.TemporalNamespace()})
+	require.NoError(t, err)
+	defer c.Close()
+	desc, err := c.DescribeWorkflow(context.Background(), billID, "")
+	require.NoError(t, err)
+	return desc.WorkflowExecution.RunID
+}
+
+// The Temporal server that scripts/with-temporal.sh starts suggests
+// continue-as-new after a few dozen history events, so this bill's workflow
+// rolls over to a new run several times while it is being written to.
 func TestBillKeepsAccruingAcrossWorkflowRollovers(t *testing.T) {
 	ctx := context.Background()
 	bill := openBill(t, "USD")
+	firstRun := billRunID(t, bill.ID)
 
 	const writers, itemsPerWriter = 4, 25
 	var wg sync.WaitGroup
@@ -350,6 +373,12 @@ func TestBillKeepsAccruingAcrossWorkflowRollovers(t *testing.T) {
 		})
 	}
 	wg.Wait()
+
+	// CI always runs against the server scripts/with-temporal.sh starts. A
+	// Temporal server with default settings would not roll over this soon.
+	if os.Getenv("CI") != "" {
+		require.NotEqual(t, firstRun, billRunID(t, bill.ID), "the workflow did not continue as new")
+	}
 
 	closed, err := CloseBill(ctx, bill.ID)
 	require.NoError(t, err)

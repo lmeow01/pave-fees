@@ -96,7 +96,7 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 		return billflow.LineItem{}, err
 	}
 	if b.Status == statusClosed {
-		return billflow.LineItem{}, errBillClosed()
+		return s.addOutcomeOnClosedBill(ctx, billID, item.IdempotencyKey)
 	}
 
 	var stored billflow.LineItem
@@ -123,23 +123,37 @@ func (s *Service) addThroughWorkflow(ctx context.Context, billID string, item bi
 func (s *Service) addOutcomeFromRecord(ctx context.Context, billID, idempotencyKey string, updateErr error) (billflow.LineItem, error) {
 	unavailable := errs.WrapCode(updateErr, errs.Unavailable, "add line item")
 
-	// The bill is read before the line item: once the bill is closed nothing
-	// more can be stored on it, so the lookup that follows is final.
 	b, err := s.findBill(ctx, billID)
 	if err != nil {
 		return billflow.LineItem{}, unavailable
 	}
+	if b.Status == statusClosed {
+		return s.addOutcomeOnClosedBill(ctx, billID, idempotencyKey)
+	}
+	stored, found, err := s.store.lineItemByKey(ctx, billID, idempotencyKey)
+	switch {
+	case err != nil:
+		return billflow.LineItem{}, unavailable
+	case found:
+		return stored, nil
+	case billflow.IsBillClosed(updateErr):
+		return billflow.LineItem{}, errBillClosed()
+	}
+	return billflow.LineItem{}, unavailable
+}
+
+// addOutcomeOnClosedBill answers an add once the bill has been read as
+// closed. Nothing more can be stored on a closed bill, so the lookup is
+// final: the line item is either on the bill or was refused.
+func (s *Service) addOutcomeOnClosedBill(ctx context.Context, billID, idempotencyKey string) (billflow.LineItem, error) {
 	stored, found, err := s.store.lineItemByKey(ctx, billID, idempotencyKey)
 	if err != nil {
 		return billflow.LineItem{}, err
 	}
-	switch {
-	case found:
+	if found {
 		return stored, nil
-	case b.Status == statusClosed || billflow.IsBillClosed(updateErr):
-		return billflow.LineItem{}, errBillClosed()
 	}
-	return billflow.LineItem{}, unavailable
+	return billflow.LineItem{}, errBillClosed()
 }
 
 // ListLineItemsParams is the request of ListLineItems.
